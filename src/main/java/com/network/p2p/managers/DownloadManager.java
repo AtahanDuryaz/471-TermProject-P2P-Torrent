@@ -93,6 +93,14 @@ public class DownloadManager {
         downloads.put(hash, download);
         System.out.println("Started download: " + fileName);
 
+        // Pre-allocate file with full size so VLC knows the file size
+        try (RandomAccessFile raf = new RandomAccessFile(outFile, "rw")) {
+            raf.setLength(size);
+            System.out.println("Pre-allocated file: " + fileName + " (" + size + " bytes)");
+        } catch (IOException e) {
+            System.err.println("Failed to pre-allocate file: " + e.getMessage());
+        }
+
         // Start workers
         for (String peerIp : initialPeers) {
             DownloadWorker worker = new DownloadWorker(peerIp, this);

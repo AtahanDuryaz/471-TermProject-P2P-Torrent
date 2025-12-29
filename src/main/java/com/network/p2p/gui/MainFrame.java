@@ -23,6 +23,11 @@ public class MainFrame extends JFrame {
     private DefaultListModel<String> videoListModel;
     private DefaultListModel<String> streamListModel;
     private JProgressBar globalBufferStatus;
+    
+    // Active download tracking
+    private int lastReceivedChunk = -1;
+    private int totalChunksForCurrentDownload = 0;
+    private static final int CHUNK_SIZE = 256 * 1024;
 
     public MainFrame() {
         setTitle("P2P Video Streamer - CSE471");
@@ -85,10 +90,21 @@ public class MainFrame extends JFrame {
 
         downloadManager.setChunkReceivedListener((fileName, chunkIndex, totalChunks, peerIp) -> {
             SwingUtilities.invokeLater(() -> {
+                lastReceivedChunk = chunkIndex;
+                totalChunksForCurrentDownload = totalChunks;
+                
                 int progress = (int) ((chunkIndex + 1) * 100.0 / totalChunks);
                 log("Chunk " + (chunkIndex + 1) + "/" + totalChunks + " received for " + fileName + " from " + peerIp + " (" + progress + "%)");
                 globalBufferStatus.setValue(progress);
                 globalBufferStatus.setString("Downloading: " + fileName + " - " + progress + "%");
+                
+                // Resume VLC if it was paused waiting for this chunk
+                if (mediaPlayerComponent != null) {
+                    if (!mediaPlayerComponent.mediaPlayer().status().isPlaying() && chunkIndex > 0) {
+                        mediaPlayerComponent.mediaPlayer().controls().play();
+                        log("Resumed playback after chunk " + (chunkIndex + 1));
+                    }
+                }
             });
         });
 
@@ -107,6 +123,26 @@ public class MainFrame extends JFrame {
     private void updateUI() {
         if (downloadManager == null)
             return;
+
+        // Monitor VLC playback position vs downloaded chunks
+        if (mediaPlayerComponent != null && mediaPlayerComponent.mediaPlayer().status().isPlaying()) {
+            long currentTimeMs = mediaPlayerComponent.mediaPlayer().status().time();
+            long fileLengthMs = mediaPlayerComponent.mediaPlayer().status().length();
+            
+            if (fileLengthMs > 0 && lastReceivedChunk >= 0) {
+                // Calculate which chunk corresponds to current playback position
+                // Assume average bitrate
+                long totalFileSize = (long) totalChunksForCurrentDownload * CHUNK_SIZE;
+                long currentBytePosition = (currentTimeMs * totalFileSize) / fileLengthMs;
+                int currentChunk = (int) (currentBytePosition / CHUNK_SIZE);
+                
+                // If playing beyond downloaded chunks, pause
+                if (currentChunk > lastReceivedChunk) {
+                    mediaPlayerComponent.mediaPlayer().controls().pause();
+                    log("Paused: Waiting for chunk " + (currentChunk + 1) + " (last received: " + (lastReceivedChunk + 1) + ")");
+                }
+            }
+        }
 
         // Iterate active downloads
         // TODO: Implement getActiveDownloads in DownloadManager
@@ -232,10 +268,22 @@ public class MainFrame extends JFrame {
                             // Wait a bit for first chunks to arrive
                             new Thread(() -> {
                                 try {
-                                    Thread.sleep(2000); // Wait 2 seconds for initial buffering
+                                    Thread.sleep(3000); // Wait 3 seconds for initial buffering
                                     SwingUtilities.invokeLater(() -> {
-                                        mediaPlayerComponent.mediaPlayer().media().play(path);
-                                        log("Started playing: " + fname);
+                                        // VLC options for progressive streaming
+                                        String[] options = {
+                                            ":file-caching=300",              // File caching 300ms (low for progressive)
+                                            ":network-caching=300",           // Network caching 300ms
+                                            ":live-caching=300",              // Live caching 300ms
+                                            ":clock-jitter=0",                // No jitter
+                                            ":clock-synchro=0"                // No clock synchro (important for progressive)
+                                        };
+                                        mediaPlayerComponent.mediaPlayer().media().play(path, options);
+                                        
+                                        // Set to loop on the available content
+                                        mediaPlayerComponent.mediaPlayer().controls().setRepeat(false);
+                                        
+                                        log("Started playing: " + fname + " (progressive mode)");
                                     });
                                 } catch (Exception ex) {
                                     ex.printStackTrace();

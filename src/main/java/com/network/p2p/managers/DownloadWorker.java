@@ -63,6 +63,10 @@ public class DownloadWorker implements Runnable {
                         in.readFully(data);
 
                         manager.receiveChunk(hash, chunkIndex, data, peerIp);
+                        
+                        // DELAY: Simulate slow network to test progressive streaming
+                        // This will cause video to buffer/pause while waiting for chunks
+                        Thread.sleep(1000); // 300ms delay per chunk
                     } else {
                         System.err.println("Peer " + peerIp + " returned error for chunk " + chunkIndex);
                         // Re-queue or mark failed? For now drop.

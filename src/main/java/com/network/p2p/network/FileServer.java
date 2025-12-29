@@ -78,6 +78,7 @@ public class FileServer {
 
             FileManager.SharedFile file = fileManager.getFileByHash(hash);
             if (file != null) {
+                System.out.println("File found: " + file.name);
                 // Send Chunk
                 // 1. Seek
                 try (FileInputStream fis = new FileInputStream(file.fileHandle)) {
@@ -91,12 +92,19 @@ public class FileServer {
                         out.writeByte(1); // OK
                         out.writeInt(bytesRead);
                         out.write(buffer, 0, bytesRead);
+                        System.out.println("Sent chunk " + chunkIndex + " (" + bytesRead + " bytes)");
                     } else {
                         // Offset out of bounds
+                        System.err.println("Offset out of bounds: " + offset + " >= " + file.size);
                         out.writeByte(0); // Error
                     }
                 }
             } else {
+                System.err.println("File NOT FOUND for hash: " + hash);
+                System.err.println("Available files in FileManager:");
+                for (FileManager.SharedFile sf : fileManager.getFileList()) {
+                    System.err.println("  - " + sf.name + " [" + sf.hash + "]");
+                }
                 out.writeByte(0); // Error (File not found)
             }
 
