@@ -13,12 +13,13 @@ import java.util.concurrent.Executors;
 
 public class FileServer {
 
-    private static final int PORT = 50001; // TCP Port for File Transfer
+    private static final int BASE_PORT = 50001; // Base TCP Port for File Transfer
     private static final int CHUNK_SIZE = 256 * 1024;
 
     private final FileManager fileManager;
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private boolean running = false;
+    private int actualPort = 0; // The port we actually bound to
 
     public FileServer(FileManager fileManager) {
         this.fileManager = fileManager;
@@ -29,7 +30,10 @@ public class FileServer {
             return;
         running = true;
         executor.submit(this::serverLoop);
-        System.out.println("FileServer started on TCP port " + PORT);
+    }
+    
+    public int getPort() {
+        return actualPort;
     }
 
     public void stop() {
@@ -38,7 +42,44 @@ public class FileServer {
     }
 
     private void serverLoop() {
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+        ServerSocket serverSocket = null;
+        
+        // Check for FILE_SERVER_PORT environment variable
+        String envPort = System.getenv("FILE_SERVER_PORT");
+        int startPort = BASE_PORT;
+        int endPort = BASE_PORT + 99;
+        
+        if (envPort != null && !envPort.trim().isEmpty()) {
+            try {
+                int fixedPort = Integer.parseInt(envPort.trim());
+                startPort = fixedPort;
+                endPort = fixedPort; // Only try the specified port
+                System.out.println("DEBUG FileServer: Using fixed port from environment: " + fixedPort);
+            } catch (NumberFormatException e) {
+                System.err.println("DEBUG FileServer: Invalid FILE_SERVER_PORT value: " + envPort + ", using default range");
+            }
+        }
+        
+        // Try to bind to a port, starting from startPort
+        for (int portAttempt = startPort; portAttempt <= endPort; portAttempt++) {
+            try {
+                serverSocket = new ServerSocket(portAttempt);
+                actualPort = portAttempt;
+                System.out.println("DEBUG FileServer: Successfully bound to port " + actualPort);
+                break;
+            } catch (IOException e) {
+                System.err.println("DEBUG FileServer: Port " + portAttempt + " is in use, trying next...");
+                if (portAttempt == BASE_PORT + 99) {
+                    System.err.println("ERROR: Could not find available port after 100 attempts!");
+                    e.printStackTrace();
+                    return;
+                }
+            }
+        }
+        
+        System.out.println("FileServer started on TCP port " + actualPort);
+        
+        try {
             while (running) {
                 Socket client = serverSocket.accept();
                 executor.submit(() -> handleClient(client));
@@ -46,6 +87,14 @@ public class FileServer {
         } catch (IOException e) {
             if (running)
                 e.printStackTrace();
+        } finally {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                try {
+                    serverSocket.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
         }
     }
 
@@ -53,20 +102,42 @@ public class FileServer {
         try (DataInputStream in = new DataInputStream(socket.getInputStream());
                 DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
 
-            // Protocol: REQUEST_CHUNK:<fileHash>:<chunkIndex>
-            // For now, keeping it simple text-based or binary
-            // Let's use simple text line for request
-
-            // Wait for request (simple implementation)
-            // Ideally we should use the same Protocol class or similar
-            // But TCP is stream based.
-
-            // Let's assume client sends: [HashLen(1)][HashBytes][ChunkIndex(4)]
-            // Or easier: UTF string "REQUEST:Hash:Index" newline
-
-            // Reading simple line (not robust for binary but okay for project text
-            // protocol)
-            // Better:
+            // Protocol: 
+            // - Request Type (4 bytes): 0 = CHUNK_REQUEST, 1 = LIST_FILES
+            // - For CHUNK_REQUEST: [HashLen(4)][HashBytes][ChunkIndex(4)]
+            // - For LIST_FILES: no additional data
+            
+            int requestType = in.readInt();
+            
+            System.out.println("🔍 DEBUG FileServer: Received request type = " + requestType);
+            
+            if (requestType == 1) {
+                // LIST_FILES request
+                System.out.println("📋 Client requested file list");
+                java.util.List<FileManager.SharedFile> files = fileManager.getFileList();
+                
+                System.out.println("📋 Found " + files.size() + " files to send");
+                
+                // Response: [FileCount(4)] then for each file: [NameLen(4)][Name][Size(8)][HashLen(4)][Hash]
+                out.writeInt(files.size());
+                for (FileManager.SharedFile file : files) {
+                    byte[] nameBytes = file.name.getBytes("UTF-8");
+                    byte[] hashBytes = file.hash.getBytes("UTF-8");
+                    
+                    System.out.println("📋 Sending: " + file.name + " (" + file.size + " bytes)");
+                    
+                    out.writeInt(nameBytes.length);
+                    out.write(nameBytes);
+                    out.writeLong(file.size);
+                    out.writeInt(hashBytes.length);
+                    out.write(hashBytes);
+                }
+                out.flush();
+                System.out.println("✅ Sent " + files.size() + " files to client");
+                return;
+            }
+            
+            // CHUNK_REQUEST (requestType == 0)
             int hashLen = in.readInt();
             byte[] hashBytes = new byte[hashLen];
             in.readFully(hashBytes);

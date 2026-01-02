@@ -17,7 +17,7 @@ public class MainFrame extends JFrame {
     private com.network.p2p.managers.DownloadManager downloadManager;
     private com.network.p2p.network.FileServer fileServer;
     private EmbeddedMediaPlayerComponent mediaPlayerComponent;
-    private java.util.Map<String, String[]> searchResults = new java.util.HashMap<>();
+    private java.util.Map<String, VideoSearchResult> searchResults = new java.util.HashMap<>();
 
     private JTextArea eventLog;
     private DefaultListModel<String> videoListModel;
@@ -25,8 +25,7 @@ public class MainFrame extends JFrame {
     private JProgressBar globalBufferStatus;
     
     // Active download tracking
-    private int lastReceivedChunk = -1;
-    private int totalChunksForCurrentDownload = 0;
+    private String currentDownloadHash = null;
     private static final int CHUNK_SIZE = 256 * 1024;
 
     public MainFrame() {
@@ -78,33 +77,38 @@ public class MainFrame extends JFrame {
         });
         peerManager.setSearchListener((fname, size, hash, peerId) -> {
             SwingUtilities.invokeLater(() -> {
-                String entry = fname + " (" + (size / 1024) + " KB) - from " + peerId;
-                if (!videoListModel.contains(entry)) {
-                    videoListModel.addElement(entry);
-                    // Store metadata for later use
-                    searchResults.put(entry, new String[] { fname, String.valueOf(size), hash, peerId });
+                VideoSearchResult result = searchResults.get(hash);
+                if (result == null) {
+                    // First time seeing this file (by hash)
+                    result = new VideoSearchResult(fname, size, hash, peerId);
+                    searchResults.put(hash, result);
+                    videoListModel.addElement(result.getDisplayText());
                     log("Found file: " + fname + " from " + peerId);
+                } else {
+                    // Same file, different peer - add peer and update display
+                    result.addPeer(peerId);
+                    // Update the display text in the list
+                    int index = -1;
+                    for (int i = 0; i < videoListModel.size(); i++) {
+                        if (videoListModel.get(i).startsWith(fname)) {
+                            index = i;
+                            break;
+                        }
+                    }
+                    if (index != -1) {
+                        videoListModel.set(index, result.getDisplayText());
+                    }
+                    log("Added peer " + peerId + " for file: " + fname + " (total peers: " + result.peerIds.size() + ")");
                 }
             });
         });
 
-        downloadManager.setChunkReceivedListener((fileName, chunkIndex, totalChunks, peerIp) -> {
+        downloadManager.setChunkReceivedListener((fileName, chunkIndex, totalChunks, peerId) -> {
             SwingUtilities.invokeLater(() -> {
-                lastReceivedChunk = chunkIndex;
-                totalChunksForCurrentDownload = totalChunks;
-                
                 int progress = (int) ((chunkIndex + 1) * 100.0 / totalChunks);
-                log("Chunk " + (chunkIndex + 1) + "/" + totalChunks + " received for " + fileName + " from " + peerIp + " (" + progress + "%)");
+                log("Chunk " + (chunkIndex + 1) + "/" + totalChunks + " received for " + fileName + " from peer " + peerId + " (" + progress + "%)");
                 globalBufferStatus.setValue(progress);
                 globalBufferStatus.setString("Downloading: " + fileName + " - " + progress + "%");
-                
-                // Resume VLC if it was paused waiting for this chunk
-                if (mediaPlayerComponent != null) {
-                    if (!mediaPlayerComponent.mediaPlayer().status().isPlaying() && chunkIndex > 0) {
-                        mediaPlayerComponent.mediaPlayer().controls().play();
-                        log("Resumed playback after chunk " + (chunkIndex + 1));
-                    }
-                }
             });
         });
 
@@ -115,37 +119,6 @@ public class MainFrame extends JFrame {
                 JOptionPane.showMessageDialog(this, "Download completed: " + fileName, "Success", JOptionPane.INFORMATION_MESSAGE);
             });
         });
-
-        // UI Timer
-        new javax.swing.Timer(1000, e -> updateUI()).start();
-    }
-
-    private void updateUI() {
-        if (downloadManager == null)
-            return;
-
-        // Monitor VLC playback position vs downloaded chunks
-        if (mediaPlayerComponent != null && mediaPlayerComponent.mediaPlayer().status().isPlaying()) {
-            long currentTimeMs = mediaPlayerComponent.mediaPlayer().status().time();
-            long fileLengthMs = mediaPlayerComponent.mediaPlayer().status().length();
-            
-            if (fileLengthMs > 0 && lastReceivedChunk >= 0) {
-                // Calculate which chunk corresponds to current playback position
-                // Assume average bitrate
-                long totalFileSize = (long) totalChunksForCurrentDownload * CHUNK_SIZE;
-                long currentBytePosition = (currentTimeMs * totalFileSize) / fileLengthMs;
-                int currentChunk = (int) (currentBytePosition / CHUNK_SIZE);
-                
-                // If playing beyond downloaded chunks, pause
-                if (currentChunk > lastReceivedChunk) {
-                    mediaPlayerComponent.mediaPlayer().controls().pause();
-                    log("Paused: Waiting for chunk " + (currentChunk + 1) + " (last received: " + (lastReceivedChunk + 1) + ")");
-                }
-            }
-        }
-
-        // Iterate active downloads
-        // TODO: Implement getActiveDownloads in DownloadManager
     }
 
     private JMenuBar createMenuBar() {
@@ -156,10 +129,26 @@ public class MainFrame extends JFrame {
 
         JMenuItem connectItem = new JMenuItem("Connect");
         connectItem.addActionListener(e -> {
-            discoveryService.start();
             fileServer.start();
-            log("Network Connected (Discovery Started).");
-            log("File Server started on port 50001.");
+            // Wait a moment for FileServer to bind to a port
+            new Thread(() -> {
+                try {
+                    Thread.sleep(500); // Wait 500ms for port binding
+                    int port = fileServer.getPort();
+                    if (port > 0) {
+                        discoveryService.setFileServerPort(port);
+                        SwingUtilities.invokeLater(() -> {
+                            log("File Server started on port " + port);
+                        });
+                    }
+                    discoveryService.start();
+                    SwingUtilities.invokeLater(() -> {
+                        log("Network Connected (Discovery Started).");
+                    });
+                } catch (InterruptedException ex) {
+                    ex.printStackTrace();
+                }
+            }).start();
         });
 
         JMenuItem disconnectItem = new JMenuItem("Disconnect");
@@ -214,19 +203,56 @@ public class MainFrame extends JFrame {
 
         JTextField searchField = new JTextField();
         JButton searchButton = new JButton("Search Network");
+        JButton addDockerPeersButton = new JButton("🐳 Add Docker Peers");
 
         searchButton.addActionListener(e -> {
             String query = searchField.getText().trim();
+            log("Searching for: " + (query.isEmpty() ? "*" : query));
+            
+            // 1. Broadcast to network peers (UDP) if query not empty
             if (!query.isEmpty()) {
-                log("Searching for: " + query);
                 String message = "ID:" + discoveryService.getPeerId() + ":" + query;
                 discoveryService.broadcastPacket(com.network.p2p.network.Protocol.TYPE_QUERY_FILES, message, 3);
             }
+            
+            // 2. Filter already loaded files (from manual peers like Docker)
+            videoListModel.clear();
+            for (VideoSearchResult vsr : searchResults.values()) {
+                if (query.isEmpty() || vsr.fileName.toLowerCase().contains(query.toLowerCase())) {
+                    videoListModel.addElement(vsr.getDisplayText());
+                }
+            }
+            
+            if (videoListModel.isEmpty()) {
+                log("No files found" + (query.isEmpty() ? "" : " matching: " + query));
+            } else {
+                log("Found " + videoListModel.size() + " matching files");
+            }
         });
+
+        addDockerPeersButton.addActionListener(e -> {
+            // Add Docker container peers via localhost port mappings
+            peerManager.addManualPeer("docker-peer1", "127.0.0.1", 51001);
+            peerManager.addManualPeer("docker-peer2", "127.0.0.1", 52001);
+            peerManager.addManualPeer("docker-peer3", "127.0.0.1", 53001);
+            log("✓ Added 3 Docker peers via localhost ports 51001, 52001, 53001");
+            JOptionPane.showMessageDialog(this, 
+                "Docker peers added!\n" +
+                "- docker-peer1 @ localhost:51001\n" +
+                "- docker-peer2 @ localhost:52001\n" +
+                "- docker-peer3 @ localhost:53001\n\n" +
+                "Now click 'Search Network' to find their files.",
+                "Docker Peers Added", 
+                JOptionPane.INFORMATION_MESSAGE);
+        });
+
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        buttonPanel.add(searchButton);
+        buttonPanel.add(addDockerPeersButton);
 
         panel.add(new JLabel("Search File: "), BorderLayout.WEST);
         panel.add(searchField, BorderLayout.CENTER);
-        panel.add(searchButton, BorderLayout.EAST);
+        panel.add(buttonPanel, BorderLayout.EAST);
         return panel;
     }
 
@@ -241,55 +267,122 @@ public class MainFrame extends JFrame {
             public void mouseClicked(java.awt.event.MouseEvent evt) {
                 if (evt.getClickCount() == 2) {
                     String selected = videoList.getSelectedValue();
-                    if (selected != null && searchResults.containsKey(selected)) {
-                        String[] meta = searchResults.get(selected);
-                        String fname = meta[0];
-                        long size = Long.parseLong(meta[1]);
-                        String hash = meta[2];
-                        String peerId = meta[3];
-
-                        log("Starting download of " + fname);
-
-                        PeerManager.PeerInfo pInfo = peerManager.getPeers().get(peerId);
-                        String ip = (pInfo != null) ? pInfo.ip : "127.0.0.1"; // Fallback or need real IP
-                        // Assuming PeerID matches Map key or we extract from metadata if stored
-                        // differently
-                        // Actually I passed peerId, need IP.
-                        // Simplified: PeerManager assumes single IP per PeerID
-
-                        java.util.Set<String> peers = new java.util.HashSet<>();
-                        peers.add(ip);
-
-                        downloadManager.startDownload(fname, hash, size, peers);
-
-                        // Start Player immediately (progressive streaming)
-                        if (mediaPlayerComponent != null && fileManager.getBufferFolder() != null) {
-                            String path = new java.io.File(fileManager.getBufferFolder(), fname).getAbsolutePath();
-                            // Wait a bit for first chunks to arrive
-                            new Thread(() -> {
-                                try {
-                                    Thread.sleep(3000); // Wait 3 seconds for initial buffering
-                                    SwingUtilities.invokeLater(() -> {
-                                        // VLC options for progressive streaming
-                                        String[] options = {
-                                            ":file-caching=300",              // File caching 300ms (low for progressive)
-                                            ":network-caching=300",           // Network caching 300ms
-                                            ":live-caching=300",              // Live caching 300ms
-                                            ":clock-jitter=0",                // No jitter
-                                            ":clock-synchro=0"                // No clock synchro (important for progressive)
-                                        };
-                                        mediaPlayerComponent.mediaPlayer().media().play(path, options);
-                                        
-                                        // Set to loop on the available content
-                                        mediaPlayerComponent.mediaPlayer().controls().setRepeat(false);
-                                        
-                                        log("Started playing: " + fname + " (progressive mode)");
-                                    });
-                                } catch (Exception ex) {
-                                    ex.printStackTrace();
-                                }
-                            }).start();
+                    if (selected == null) return;
+                    
+                    // Find the VideoSearchResult by matching display text
+                    VideoSearchResult result = null;
+                    for (VideoSearchResult vsr : searchResults.values()) {
+                        if (selected.startsWith(vsr.fileName)) {
+                            result = vsr;
+                            break;
                         }
+                    }
+                    
+                    if (result == null) return;
+                    
+                    String fname = result.fileName;
+                    long size = result.size;
+                    String hash = result.hash;
+
+                    // Show peer selection dialog if multiple peers available
+                    java.util.List<String> selectedPeers = new java.util.ArrayList<>();
+                    if (result.peerIds.size() > 1) {
+                        // Multi-selection dialog
+                        JPanel panel = new JPanel(new BorderLayout(10, 10));
+                        panel.add(new JLabel("Select peers to download from:"), BorderLayout.NORTH);
+                        
+                        JList<String> peerList = new JList<>(result.peerIds.toArray(new String[0]));
+                        peerList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+                        peerList.setSelectedIndex(0); // Select first by default
+                        panel.add(new JScrollPane(peerList), BorderLayout.CENTER);
+                        
+                        int option = JOptionPane.showConfirmDialog(MainFrame.this, panel, 
+                            "Download: " + fname, JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+                        
+                        if (option != JOptionPane.OK_OPTION) return;
+                        
+                        java.util.List<String> selectedPeersList = peerList.getSelectedValuesList();
+                        if (selectedPeersList.isEmpty()) {
+                            JOptionPane.showMessageDialog(MainFrame.this, "Please select at least one peer", "No Peer Selected", JOptionPane.WARNING_MESSAGE);
+                            return;
+                        }
+                        selectedPeers.addAll(selectedPeersList);
+                    } else {
+                        // Only one peer, use it directly
+                        selectedPeers.addAll(result.peerIds);
+                    }
+
+                    log("=== DEBUG: Starting download of " + fname + " from " + selectedPeers.size() + " peer(s) ===");
+                    log("DEBUG: Selected PeerIds: " + selectedPeers);
+
+                    log("=== DEBUG: Starting download of " + fname + " from " + selectedPeers.size() + " peer(s) ===");
+                    log("DEBUG: Selected PeerIds: " + selectedPeers);
+
+                    // Collect ONLY SELECTED peers for this file
+                    java.util.Set<String> peerIds = new java.util.HashSet<>();
+                    java.util.Map<String, String> peerIdToIp = new java.util.HashMap<>();
+                    java.util.Map<String, Integer> peerIdToPort = new java.util.HashMap<>();
+                    
+                    log("DEBUG: Total peers in PeerManager: " + peerManager.getPeers().size());
+                    for (String peerId : selectedPeers) {
+                        log("DEBUG: Looking for peerId: " + peerId);
+                        PeerManager.PeerInfo pInfo = peerManager.getPeers().get(peerId);
+                        if (pInfo == null) {
+                            log("DEBUG: ERROR - PeerInfo is NULL for peerId: " + peerId);
+                        } else {
+                            log("DEBUG: Found PeerInfo - IP: " + pInfo.ip + ", Port: " + pInfo.port);
+                            if (pInfo.ip != null && !pInfo.ip.trim().isEmpty()) {
+                                peerIds.add(peerId);
+                                peerIdToIp.put(peerId, pInfo.ip);
+                                peerIdToPort.put(peerId, pInfo.port);
+                                log("DEBUG: ✓ Added peerId: " + peerId + ", IP: " + pInfo.ip + ", port=" + pInfo.port);
+                            } else {
+                                log("DEBUG: ERROR - IP is null or empty for peerId: " + peerId);
+                            }
+                        }
+                    }
+                    
+                    log("DEBUG: Total peers collected: " + peerIds.size());
+                    log("DEBUG: PeerId->IP mapping: " + peerIdToIp);
+                    log("DEBUG: PeerId->Port mapping: " + peerIdToPort);
+                    
+                    if (peerIds.isEmpty()) {
+                        log("ERROR: No valid peers available for download");
+                        return;
+                    }
+
+                    // Store current download hash for tracking
+                    currentDownloadHash = hash;
+                    
+                    log("=== Starting download of " + fname + " from " + peerIds.size() + " peer(s) ===");
+
+                    downloadManager.startDownload(fname, hash, size, peerIds, peerIdToIp, peerIdToPort);
+
+                    // Simple approach: Wait for some chunks then start VLC
+                    if (mediaPlayerComponent != null && fileManager.getBufferFolder() != null) {
+                        String path = new java.io.File(fileManager.getBufferFolder(), fname).getAbsolutePath();
+                        new Thread(() -> {
+                            try {
+                                System.out.println("\n🎬 Waiting 4 seconds for initial chunks to download...");
+                                Thread.sleep(4000); // Wait 4 seconds for more chunks
+                                SwingUtilities.invokeLater(() -> {
+                                    System.out.println("🎬 Starting VLC playback...");
+                                    System.out.println("File path: " + path);
+                                    
+                                    // VLC options to handle incomplete/downloading files
+                                    String[] vlcOptions = {
+                                        ":file-caching=2000",
+                                        ":network-caching=2000"
+                                    };
+                                    
+                                    mediaPlayerComponent.mediaPlayer().media().play(path, vlcOptions);
+                                    log("📼 Playing: " + fname + " (download in progress, may buffer)");
+                                    System.out.println("✅ VLC started with 2s cache - will buffer automatically if needed\n");
+                                });
+                            } catch (Exception ex) {
+                                ex.printStackTrace();
+                            }
+                        }).start();
                     }
                 }
             }
