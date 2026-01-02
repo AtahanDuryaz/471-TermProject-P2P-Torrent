@@ -17,7 +17,7 @@ public class MainFrame extends JFrame {
     private com.network.p2p.managers.DownloadManager downloadManager;
     private com.network.p2p.network.FileServer fileServer;
     private EmbeddedMediaPlayerComponent mediaPlayerComponent;
-    private java.util.Map<String, String[]> searchResults = new java.util.HashMap<>();
+    private java.util.Map<String, VideoSearchResult> searchResults = new java.util.HashMap<>();
 
     private JTextArea eventLog;
     private DefaultListModel<String> videoListModel;
@@ -78,23 +78,39 @@ public class MainFrame extends JFrame {
         });
         peerManager.setSearchListener((fname, size, hash, peerId) -> {
             SwingUtilities.invokeLater(() -> {
-                String entry = fname + " (" + (size / 1024) + " KB) - from " + peerId;
-                if (!videoListModel.contains(entry)) {
-                    videoListModel.addElement(entry);
-                    // Store metadata for later use
-                    searchResults.put(entry, new String[] { fname, String.valueOf(size), hash, peerId });
+                VideoSearchResult result = searchResults.get(hash);
+                if (result == null) {
+                    // First time seeing this file (by hash)
+                    result = new VideoSearchResult(fname, size, hash, peerId);
+                    searchResults.put(hash, result);
+                    videoListModel.addElement(result.getDisplayText());
                     log("Found file: " + fname + " from " + peerId);
+                } else {
+                    // Same file, different peer - add peer and update display
+                    result.addPeer(peerId);
+                    // Update the display text in the list
+                    int index = -1;
+                    for (int i = 0; i < videoListModel.size(); i++) {
+                        if (videoListModel.get(i).startsWith(fname)) {
+                            index = i;
+                            break;
+                        }
+                    }
+                    if (index != -1) {
+                        videoListModel.set(index, result.getDisplayText());
+                    }
+                    log("Added peer " + peerId + " for file: " + fname + " (total peers: " + result.peerIds.size() + ")");
                 }
             });
         });
 
-        downloadManager.setChunkReceivedListener((fileName, chunkIndex, totalChunks, peerIp) -> {
+        downloadManager.setChunkReceivedListener((fileName, chunkIndex, totalChunks, peerId) -> {
             SwingUtilities.invokeLater(() -> {
                 lastReceivedChunk = chunkIndex;
                 totalChunksForCurrentDownload = totalChunks;
                 
                 int progress = (int) ((chunkIndex + 1) * 100.0 / totalChunks);
-                log("Chunk " + (chunkIndex + 1) + "/" + totalChunks + " received for " + fileName + " from " + peerIp + " (" + progress + "%)");
+                log("Chunk " + (chunkIndex + 1) + "/" + totalChunks + " received for " + fileName + " from peer " + peerId + " (" + progress + "%)");
                 globalBufferStatus.setValue(progress);
                 globalBufferStatus.setString("Downloading: " + fileName + " - " + progress + "%");
                 
@@ -156,10 +172,26 @@ public class MainFrame extends JFrame {
 
         JMenuItem connectItem = new JMenuItem("Connect");
         connectItem.addActionListener(e -> {
-            discoveryService.start();
             fileServer.start();
-            log("Network Connected (Discovery Started).");
-            log("File Server started on port 50001.");
+            // Wait a moment for FileServer to bind to a port
+            new Thread(() -> {
+                try {
+                    Thread.sleep(500); // Wait 500ms for port binding
+                    int port = fileServer.getPort();
+                    if (port > 0) {
+                        discoveryService.setFileServerPort(port);
+                        SwingUtilities.invokeLater(() -> {
+                            log("File Server started on port " + port);
+                        });
+                    }
+                    discoveryService.start();
+                    SwingUtilities.invokeLater(() -> {
+                        log("Network Connected (Discovery Started).");
+                    });
+                } catch (InterruptedException ex) {
+                    ex.printStackTrace();
+                }
+            }).start();
         });
 
         JMenuItem disconnectItem = new JMenuItem("Disconnect");
@@ -241,55 +273,88 @@ public class MainFrame extends JFrame {
             public void mouseClicked(java.awt.event.MouseEvent evt) {
                 if (evt.getClickCount() == 2) {
                     String selected = videoList.getSelectedValue();
-                    if (selected != null && searchResults.containsKey(selected)) {
-                        String[] meta = searchResults.get(selected);
-                        String fname = meta[0];
-                        long size = Long.parseLong(meta[1]);
-                        String hash = meta[2];
-                        String peerId = meta[3];
-
-                        log("Starting download of " + fname);
-
-                        PeerManager.PeerInfo pInfo = peerManager.getPeers().get(peerId);
-                        String ip = (pInfo != null) ? pInfo.ip : "127.0.0.1"; // Fallback or need real IP
-                        // Assuming PeerID matches Map key or we extract from metadata if stored
-                        // differently
-                        // Actually I passed peerId, need IP.
-                        // Simplified: PeerManager assumes single IP per PeerID
-
-                        java.util.Set<String> peers = new java.util.HashSet<>();
-                        peers.add(ip);
-
-                        downloadManager.startDownload(fname, hash, size, peers);
-
-                        // Start Player immediately (progressive streaming)
-                        if (mediaPlayerComponent != null && fileManager.getBufferFolder() != null) {
-                            String path = new java.io.File(fileManager.getBufferFolder(), fname).getAbsolutePath();
-                            // Wait a bit for first chunks to arrive
-                            new Thread(() -> {
-                                try {
-                                    Thread.sleep(3000); // Wait 3 seconds for initial buffering
-                                    SwingUtilities.invokeLater(() -> {
-                                        // VLC options for progressive streaming
-                                        String[] options = {
-                                            ":file-caching=300",              // File caching 300ms (low for progressive)
-                                            ":network-caching=300",           // Network caching 300ms
-                                            ":live-caching=300",              // Live caching 300ms
-                                            ":clock-jitter=0",                // No jitter
-                                            ":clock-synchro=0"                // No clock synchro (important for progressive)
-                                        };
-                                        mediaPlayerComponent.mediaPlayer().media().play(path, options);
-                                        
-                                        // Set to loop on the available content
-                                        mediaPlayerComponent.mediaPlayer().controls().setRepeat(false);
-                                        
-                                        log("Started playing: " + fname + " (progressive mode)");
-                                    });
-                                } catch (Exception ex) {
-                                    ex.printStackTrace();
-                                }
-                            }).start();
+                    if (selected == null) return;
+                    
+                    // Find the VideoSearchResult by matching display text
+                    VideoSearchResult result = null;
+                    for (VideoSearchResult vsr : searchResults.values()) {
+                        if (selected.startsWith(vsr.fileName)) {
+                            result = vsr;
+                            break;
                         }
+                    }
+                    
+                    if (result == null) return;
+                    
+                    String fname = result.fileName;
+                    long size = result.size;
+                    String hash = result.hash;
+
+                    log("=== DEBUG: Starting download of " + fname + " from " + result.peerIds.size() + " peer(s) ===");
+                    log("DEBUG: PeerIds in result: " + result.peerIds);
+
+                    // Collect ALL peers for this file - use peerIds instead of IPs (same IP can have multiple peers)
+                    java.util.Set<String> peerIds = new java.util.HashSet<>();
+                    java.util.Map<String, String> peerIdToIp = new java.util.HashMap<>();
+                    java.util.Map<String, Integer> peerIdToPort = new java.util.HashMap<>();
+                    
+                    log("DEBUG: Total peers in PeerManager: " + peerManager.getPeers().size());
+                    for (String peerId : result.peerIds) {
+                        log("DEBUG: Looking for peerId: " + peerId);
+                        PeerManager.PeerInfo pInfo = peerManager.getPeers().get(peerId);
+                        if (pInfo == null) {
+                            log("DEBUG: ERROR - PeerInfo is NULL for peerId: " + peerId);
+                        } else {
+                            log("DEBUG: Found PeerInfo - IP: " + pInfo.ip + ", Port: " + pInfo.port);
+                            if (pInfo.ip != null && !pInfo.ip.trim().isEmpty()) {
+                                peerIds.add(peerId);
+                                peerIdToIp.put(peerId, pInfo.ip);
+                                peerIdToPort.put(peerId, pInfo.port);
+                                log("DEBUG: ✓ Added peerId: " + peerId + ", IP: " + pInfo.ip + ", port=" + pInfo.port);
+                            } else {
+                                log("DEBUG: ERROR - IP is null or empty for peerId: " + peerId);
+                            }
+                        }
+                    }
+                    
+                    log("DEBUG: Total peers collected: " + peerIds.size());
+                    log("DEBUG: PeerId->IP mapping: " + peerIdToIp);
+                    log("DEBUG: PeerId->Port mapping: " + peerIdToPort);
+                    
+                    if (peerIds.isEmpty()) {
+                        log("ERROR: No valid peers available for download");
+                        return;
+                    }
+
+                    downloadManager.startDownload(fname, hash, size, peerIds, peerIdToIp, peerIdToPort);
+
+                    // Start Player immediately (progressive streaming)
+                    if (mediaPlayerComponent != null && fileManager.getBufferFolder() != null) {
+                        String path = new java.io.File(fileManager.getBufferFolder(), fname).getAbsolutePath();
+                        // Wait a bit for first chunks to arrive
+                        new Thread(() -> {
+                            try {
+                                Thread.sleep(3000); // Wait 3 seconds for initial buffering
+                                SwingUtilities.invokeLater(() -> {
+                                    // VLC options for progressive streaming
+                                    String[] options = {
+                                        ":file-caching=300",              // File caching 300ms (low for progressive)
+                                        ":network-caching=300",           // Network caching 300ms
+                                        ":live-caching=300",              // Live caching 300ms
+                                        ":clock-jitter=0",                // No jitter
+                                        ":clock-synchro=0"                // No clock synchro (important for progressive)
+                                    };
+                                    mediaPlayerComponent.mediaPlayer().media().play(path, options);
+                                    
+                                    // Set to loop on the available content
+                                    mediaPlayerComponent.mediaPlayer().controls().setRepeat(false);
+                                    
+                                    log("Started playing: " + fname + " (progressive mode)");
+                                });
+                            } catch (Exception ex) {
+                                ex.printStackTrace();
+                            }
+                        }).start();
                     }
                 }
             }

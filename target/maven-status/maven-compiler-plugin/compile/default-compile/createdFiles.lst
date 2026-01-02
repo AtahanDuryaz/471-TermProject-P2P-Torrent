@@ -1,3 +1,4 @@
+com\network\p2p\gui\VideoSearchResult.class
 com\network\p2p\managers\FileManager.class
 com\network\p2p\managers\DownloadManager$ActiveDownload.class
 com\network\p2p\gui\MainFrame$1.class

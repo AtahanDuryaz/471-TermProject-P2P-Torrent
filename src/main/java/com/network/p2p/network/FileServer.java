@@ -13,12 +13,13 @@ import java.util.concurrent.Executors;
 
 public class FileServer {
 
-    private static final int PORT = 50001; // TCP Port for File Transfer
+    private static final int BASE_PORT = 50001; // Base TCP Port for File Transfer
     private static final int CHUNK_SIZE = 256 * 1024;
 
     private final FileManager fileManager;
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private boolean running = false;
+    private int actualPort = 0; // The port we actually bound to
 
     public FileServer(FileManager fileManager) {
         this.fileManager = fileManager;
@@ -29,7 +30,10 @@ public class FileServer {
             return;
         running = true;
         executor.submit(this::serverLoop);
-        System.out.println("FileServer started on TCP port " + PORT);
+    }
+    
+    public int getPort() {
+        return actualPort;
     }
 
     public void stop() {
@@ -38,7 +42,27 @@ public class FileServer {
     }
 
     private void serverLoop() {
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+        ServerSocket serverSocket = null;
+        // Try to bind to a port, starting from BASE_PORT
+        for (int portAttempt = BASE_PORT; portAttempt < BASE_PORT + 100; portAttempt++) {
+            try {
+                serverSocket = new ServerSocket(portAttempt);
+                actualPort = portAttempt;
+                System.out.println("DEBUG FileServer: Successfully bound to port " + actualPort);
+                break;
+            } catch (IOException e) {
+                System.err.println("DEBUG FileServer: Port " + portAttempt + " is in use, trying next...");
+                if (portAttempt == BASE_PORT + 99) {
+                    System.err.println("ERROR: Could not find available port after 100 attempts!");
+                    e.printStackTrace();
+                    return;
+                }
+            }
+        }
+        
+        System.out.println("FileServer started on TCP port " + actualPort);
+        
+        try {
             while (running) {
                 Socket client = serverSocket.accept();
                 executor.submit(() -> handleClient(client));
@@ -46,6 +70,14 @@ public class FileServer {
         } catch (IOException e) {
             if (running)
                 e.printStackTrace();
+        } finally {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                try {
+                    serverSocket.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
         }
     }
 
