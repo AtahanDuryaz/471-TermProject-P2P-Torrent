@@ -25,6 +25,7 @@ public class MainFrame extends JFrame {
     private JProgressBar globalBufferStatus;
     
     // Active download tracking
+    private String currentDownloadHash = null;
     private int lastReceivedChunk = -1;
     private int totalChunksForCurrentDownload = 0;
     private static final int CHUNK_SIZE = 256 * 1024;
@@ -114,12 +115,37 @@ public class MainFrame extends JFrame {
                 globalBufferStatus.setValue(progress);
                 globalBufferStatus.setString("Downloading: " + fileName + " - " + progress + "%");
                 
-                // Resume VLC if it was paused waiting for this chunk
-                if (mediaPlayerComponent != null) {
-                    if (!mediaPlayerComponent.mediaPlayer().status().isPlaying() && chunkIndex > 0) {
-                        mediaPlayerComponent.mediaPlayer().controls().play();
-                        log("Resumed playback after chunk " + (chunkIndex + 1));
+                // Check if we can start/resume playback based on sequential chunks
+                if (currentDownloadHash != null && mediaPlayerComponent != null) {
+                    com.network.p2p.managers.DownloadManager.ActiveDownload download = 
+                        downloadManager.getDownload(currentDownloadHash);
+                    
+                    if (download != null) {
+                        int lastConsecutive = download.getLastConsecutiveChunk();
+                        boolean isPlaying = mediaPlayerComponent.mediaPlayer().status().isPlaying();
+                        
+                        System.out.println("\n>>> GUI PLAYBACK CONTROL DEBUG <<<");
+                        System.out.println("DEBUG GUI: Current hash matches: " + (currentDownloadHash != null));
+                        System.out.println("DEBUG GUI: Last consecutive chunk: " + lastConsecutive);
+                        System.out.println("DEBUG GUI: VLC is currently playing: " + isPlaying);
+                        System.out.println("DEBUG GUI: Should start playback: " + (!isPlaying && lastConsecutive >= 1));
+                        
+                        // If we have the first few chunks ready and player is not playing, start it
+                        if (!isPlaying && lastConsecutive >= 1) {
+                            mediaPlayerComponent.mediaPlayer().controls().play();
+                            log("🎬 PLAYBACK STARTED - consecutive chunks 0-" + lastConsecutive + " available");
+                            System.out.println("DEBUG GUI: ✓✓✓ PLAYBACK STARTED! ✓✓✓");
+                        } else if (isPlaying) {
+                            System.out.println("DEBUG GUI: Video already playing, no action needed");
+                        } else {
+                            System.out.println("DEBUG GUI: Not enough consecutive chunks yet (need >= 2, have 0-" + lastConsecutive + ")");
+                        }
+                        System.out.println(">>> END GUI PLAYBACK CONTROL <<<\n");
+                    } else {
+                        System.out.println("DEBUG GUI ERROR: Download object is NULL!");
                     }
+                } else {
+                    System.out.println("DEBUG GUI: Skipping playback control - hash or mediaPlayer is null");
                 }
             });
         });
@@ -133,35 +159,69 @@ public class MainFrame extends JFrame {
         });
 
         // UI Timer
+        System.out.println("\n🕐 DEBUG: Starting UI Update Timer (runs every 1 second)");
         new javax.swing.Timer(1000, e -> updateUI()).start();
+        System.out.println("🕐 DEBUG: UI Update Timer STARTED successfully!\n");
     }
 
     private void updateUI() {
         if (downloadManager == null)
             return;
 
-        // Monitor VLC playback position vs downloaded chunks
-        if (mediaPlayerComponent != null && mediaPlayerComponent.mediaPlayer().status().isPlaying()) {
-            long currentTimeMs = mediaPlayerComponent.mediaPlayer().status().time();
-            long fileLengthMs = mediaPlayerComponent.mediaPlayer().status().length();
+        // Monitor VLC playback position vs downloaded consecutive chunks
+        if (mediaPlayerComponent != null && currentDownloadHash != null) {
+            com.network.p2p.managers.DownloadManager.ActiveDownload download = 
+                downloadManager.getDownload(currentDownloadHash);
             
-            if (fileLengthMs > 0 && lastReceivedChunk >= 0) {
-                // Calculate which chunk corresponds to current playback position
-                // Assume average bitrate
-                long totalFileSize = (long) totalChunksForCurrentDownload * CHUNK_SIZE;
-                long currentBytePosition = (currentTimeMs * totalFileSize) / fileLengthMs;
-                int currentChunk = (int) (currentBytePosition / CHUNK_SIZE);
+            if (download != null && !download.isComplete()) {
+                int lastConsecutiveChunk = download.getLastConsecutiveChunk();
+                boolean isPlaying = mediaPlayerComponent.mediaPlayer().status().isPlaying();
                 
-                // If playing beyond downloaded chunks, pause
-                if (currentChunk > lastReceivedChunk) {
-                    mediaPlayerComponent.mediaPlayer().controls().pause();
-                    log("Paused: Waiting for chunk " + (currentChunk + 1) + " (last received: " + (lastReceivedChunk + 1) + ")");
+                System.out.println("\n[UPDATE UI TIMER - Every Second]");
+                System.out.println("DEBUG TIMER: Download active: " + (download != null));
+                System.out.println("DEBUG TIMER: Last consecutive chunk: " + lastConsecutiveChunk);
+                System.out.println("DEBUG TIMER: VLC is playing: " + isPlaying);
+                
+                if (isPlaying) {
+                    long currentTimeMs = mediaPlayerComponent.mediaPlayer().status().time();
+                    long fileLengthMs = mediaPlayerComponent.mediaPlayer().status().length();
+                    
+                    System.out.println("DEBUG TIMER: Current playback time: " + currentTimeMs + "ms");
+                    System.out.println("DEBUG TIMER: Total file length: " + fileLengthMs + "ms");
+                    
+                    if (fileLengthMs > 0) {
+                        // Calculate which chunk corresponds to current playback position
+                        long totalFileSize = download.fileSize;
+                        long currentBytePosition = (currentTimeMs * totalFileSize) / fileLengthMs;
+                        int currentChunk = (int) (currentBytePosition / CHUNK_SIZE);
+                        
+                        System.out.println("DEBUG TIMER: Calculated current chunk position: " + currentChunk);
+                        System.out.println("DEBUG TIMER: Need to pause? " + (currentChunk > lastConsecutiveChunk));
+                        
+                        // If playing beyond consecutively downloaded chunks, pause
+                        if (currentChunk > lastConsecutiveChunk) {
+                            mediaPlayerComponent.mediaPlayer().controls().pause();
+                            log("⏸️ PAUSED: Waiting for chunk " + (currentChunk + 1) + " (last consecutive: " + (lastConsecutiveChunk + 1) + ")");
+                            System.out.println("DEBUG TIMER: ⏸️⏸️⏸️ VIDEO PAUSED - WAITING FOR CHUNK " + currentChunk + " ⏸️⏸️⏸️");
+                        }
+                    }
+                } else {
+                    System.out.println("DEBUG TIMER: Video is paused");
+                    // Player is paused - check if we can resume
+                    // Resume if we have at least 2-3 chunks ahead available
+                    if (lastConsecutiveChunk >= 2) {
+                        mediaPlayerComponent.mediaPlayer().controls().play();
+                        log("▶️ RESUMED: Consecutive chunks 0-" + lastConsecutiveChunk + " now available");
+                        System.out.println("DEBUG TIMER: ▶️▶️▶️ VIDEO RESUMED - CHUNKS AVAILABLE ▶️▶️▶️");
+                    } else {
+                        System.out.println("DEBUG TIMER: Still waiting for more chunks (have 0-" + lastConsecutiveChunk + ", need >= 2)");
+                    }
                 }
+                System.out.println("[END UPDATE UI TIMER]\n");
+            } else if (download != null && download.isComplete()) {
+                System.out.println("DEBUG TIMER: Download complete, no monitoring needed");
             }
         }
-
-        // Iterate active downloads
-        // TODO: Implement getActiveDownloads in DownloadManager
     }
 
     private JMenuBar createMenuBar() {
@@ -326,6 +386,18 @@ public class MainFrame extends JFrame {
                         return;
                     }
 
+                    // Store current download hash for tracking
+                    currentDownloadHash = hash;
+                    
+                    System.out.println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    System.out.println("🎬 STARTING NEW DOWNLOAD");
+                    System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    System.out.println("DEBUG DOWNLOAD START: File = " + fname);
+                    System.out.println("DEBUG DOWNLOAD START: Hash = " + hash);
+                    System.out.println("DEBUG DOWNLOAD START: Size = " + size + " bytes");
+                    System.out.println("DEBUG DOWNLOAD START: Peers = " + peerIds.size());
+                    System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
                     downloadManager.startDownload(fname, hash, size, peerIds, peerIdToIp, peerIdToPort);
 
                     // Start Player immediately (progressive streaming)
@@ -334,22 +406,29 @@ public class MainFrame extends JFrame {
                         // Wait a bit for first chunks to arrive
                         new Thread(() -> {
                             try {
-                                Thread.sleep(3000); // Wait 3 seconds for initial buffering
+                                System.out.println("\nDEBUG VLC: Waiting 1.5s for initial buffer...");
+                                Thread.sleep(200); // Wait 1.5 seconds for initial buffering (reduced from 3s)
                                 SwingUtilities.invokeLater(() -> {
+                                    System.out.println("DEBUG VLC: Loading video into VLC player");
+                                    System.out.println("DEBUG VLC: File path: " + path);
+                                    
                                     // VLC options for progressive streaming
                                     String[] options = {
                                         ":file-caching=300",              // File caching 300ms (low for progressive)
                                         ":network-caching=300",           // Network caching 300ms
                                         ":live-caching=300",              // Live caching 300ms
                                         ":clock-jitter=0",                // No jitter
-                                        ":clock-synchro=0"                // No clock synchro (important for progressive)
+                                        ":clock-synchro=0",               // No clock synchro (important for progressive)
+                                        ":start-paused"                   // Start paused, will auto-play when chunks ready
                                     };
                                     mediaPlayerComponent.mediaPlayer().media().play(path, options);
                                     
-                                    // Set to loop on the available content
-                                    mediaPlayerComponent.mediaPlayer().controls().setRepeat(false);
+                                    System.out.println("DEBUG VLC: Video loaded, setting to paused state");
+                                    // Will be started by chunk listener when first chunks are ready
+                                    mediaPlayerComponent.mediaPlayer().controls().setPause(true);
                                     
-                                    log("Started playing: " + fname + " (progressive mode)");
+                                    log("📼 Loaded video: " + fname + " (waiting for sequential chunks to start playback)");
+                                    System.out.println("DEBUG VLC: ✓ Video ready in paused state, waiting for chunks...\n");
                                 });
                             } catch (Exception ex) {
                                 ex.printStackTrace();

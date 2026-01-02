@@ -20,7 +20,7 @@ public class DownloadManager {
         public BitSet inProgressChunks; // Track chunks currently being downloaded
         public File outputFile;
         public Set<String> sources = new HashSet<>(); // IP:Port
-        public ConcurrentHashMap<String, DownloadWorker> workers = new ConcurrentHashMap<>(); // peerId -> worker
+        public ConcurrentHashMap<String, DownloadWorker> workers = new ConcurrentHashMap<>(); // peerIp -> worker
         public long startTime;
 
         public ActiveDownload(String fileName, String hash, long fileSize, File outputFile) {
@@ -41,6 +41,36 @@ public class DownloadManager {
         public boolean isComplete() {
             return completedChunks.cardinality() == totalChunks;
         }
+
+        // Get the last consecutive chunk index starting from 0
+        // Returns -1 if chunk 0 is not available, otherwise returns the highest consecutive index
+        public int getLastConsecutiveChunk() {
+            if (!completedChunks.get(0)) {
+                System.out.println("DEBUG SEQ: Chunk 0 not available yet");
+                return -1;
+            }
+            
+            int lastConsecutive = 0;
+            for (int i = 1; i < totalChunks; i++) {
+                if (completedChunks.get(i)) {
+                    lastConsecutive = i;
+                } else {
+                    System.out.println("DEBUG SEQ: Gap found at chunk " + i + ", last consecutive = " + lastConsecutive);
+                    break;
+                }
+            }
+            
+            if (lastConsecutive == totalChunks - 1) {
+                System.out.println("DEBUG SEQ: All chunks consecutive! Last = " + lastConsecutive);
+            }
+            
+            return lastConsecutive;
+        }
+
+        // Get the first missing chunk index
+        public int getFirstMissingChunk() {
+            return completedChunks.nextClearBit(0);
+        }
     }
 
     private final ConcurrentHashMap<String, ActiveDownload> downloads = new ConcurrentHashMap<>();
@@ -48,7 +78,7 @@ public class DownloadManager {
     private FileManager fileManager;
 
     public interface ChunkReceivedListener {
-        void onChunkReceived(String fileName, int chunkIndex, int totalChunks, String peerId);
+        void onChunkReceived(String fileName, int chunkIndex, int totalChunks, String peerIp);
     }
 
     public interface DownloadCompleteListener {
@@ -74,26 +104,16 @@ public class DownloadManager {
         this.completeListener = listener;
     }
 
-    public void startDownload(String fileName, String hash, long size, Set<String> peerIds, 
-                             java.util.Map<String, String> peerIdToIp, java.util.Map<String, Integer> peerIdToPort) {
-        System.out.println("=== DEBUG DownloadManager.startDownload ===");
-        System.out.println("DEBUG: fileName=" + fileName + ", hash=" + hash + ", size=" + size);
-        System.out.println("DEBUG: peerIds=" + peerIds);
-        System.out.println("DEBUG: peerIdToIp mapping=" + peerIdToIp);
-        System.out.println("DEBUG: peerIdToPort mapping=" + peerIdToPort);
-        
-        if (downloads.containsKey(hash)) {
-            System.out.println("DEBUG: Download already exists for hash: " + hash);
+    public void startDownload(String fileName, String hash, long size, Set<String> initialPeerIds,
+                              java.util.Map<String, String> peerIdToIp, java.util.Map<String, Integer> peerIdToPort) {
+        if (downloads.containsKey(hash))
             return;
-        }
 
         // Validate peers
-        if (peerIds == null || peerIds.isEmpty()) {
-            System.err.println("DEBUG ERROR: No peers available for download: " + fileName);
+        if (initialPeerIds == null || initialPeerIds.isEmpty()) {
+            System.err.println("No peers available for download: " + fileName);
             return;
         }
-        
-        System.out.println("DEBUG: Number of peers: " + peerIds.size());
 
         // Check buffer folder from FileManager first, then fallback to local
         File targetBufferFolder = bufferFolder;
@@ -108,13 +128,7 @@ public class DownloadManager {
 
         File outFile = new File(targetBufferFolder, fileName);
         ActiveDownload download = new ActiveDownload(fileName, hash, size, outFile);
-        // Note: sources is IP-based, we'll add IPs from the mapping
-        for (String peerId : peerIds) {
-            String ip = peerIdToIp.get(peerId);
-            if (ip != null) {
-                download.sources.add(ip);
-            }
-        }
+        download.sources.addAll(initialPeerIds);
 
         downloads.put(hash, download);
         System.out.println("Started download: " + fileName);
@@ -128,64 +142,65 @@ public class DownloadManager {
         }
 
         // Start workers and distribute chunks in round-robin fashion (Torrent-style)
-        int peerCount = peerIds.size();
-        String[] peerIdArray = peerIds.toArray(new String[0]);
+        int peerCount = initialPeerIds.size();
+        String[] peerIdArray = initialPeerIds.toArray(new String[0]);
         
-        System.out.println("DEBUG: Creating workers for " + peerCount + " peers");
         for (int i = 0; i < peerCount; i++) {
             String peerId = peerIdArray[i];
-            String peerIp = peerIdToIp.get(peerId);
-            int port = peerIdToPort.getOrDefault(peerId, 50001); // Default fallback
-            
-            System.out.println("DEBUG: Processing peer " + i + ": PeerId=" + peerId + ", IP=" + peerIp + ", Port=" + port);
-            if (peerIp == null || peerIp.trim().isEmpty()) {
-                System.err.println("DEBUG: Skipping - IP is null or empty for peerId: " + peerId);
+            if (peerId == null || peerId.trim().isEmpty()) {
+                System.err.println("Skipping null or empty peer ID at index " + i);
                 continue;
             }
-            System.out.println("DEBUG: Creating worker - PeerId: " + peerId + ", IP: " + peerIp + ", Port: " + port);
-            DownloadWorker worker = new DownloadWorker(peerIp, port, peerId, this);
+            
+            String peerIp = peerIdToIp.get(peerId);
+            Integer peerPort = peerIdToPort.get(peerId);
+            
+            if (peerIp == null || peerPort == null) {
+                System.err.println("Skipping peer " + peerId + " - missing IP or port");
+                continue;
+            }
+            
+            DownloadWorker worker = new DownloadWorker(peerIp, peerPort, peerId, this);
             download.workers.put(peerId, worker);
             new Thread(worker, "DownloadWorker-" + peerId).start();
-            System.out.println("DEBUG: ✓ Worker created and started for peer: " + peerId);
         }
-        
-        System.out.println("DEBUG: Total workers created: " + download.workers.size());
         
         // Distribute chunks across peers in round-robin fashion
         // This ensures each peer downloads different chunks (like BitTorrent)
         if (download.workers.isEmpty()) {
-            System.err.println("DEBUG ERROR: No valid workers created for download: " + fileName);
+            System.err.println("No valid workers created for download: " + fileName);
             downloads.remove(hash);
             return;
         }
         
-        // Re-use peerIdArray from workers in case some were skipped
-        peerIdArray = download.workers.keySet().toArray(new String[0]);
-        int workerCount = peerIdArray.length;
+        String[] workerPeerIds = download.workers.keySet().toArray(new String[0]);
+        int workerCount = workerPeerIds.length;
         
-        System.out.println("DEBUG: Distributing " + download.totalChunks + " chunks across " + workerCount + " workers");
-        System.out.println("DEBUG: Workers: " + java.util.Arrays.toString(peerIdArray));
+        System.out.println("\n╔══════════════════════════════════════════════════════════════╗");
+        System.out.println("║ CHUNK DISTRIBUTION - Round Robin (Torrent-style)");
+        System.out.println("╠══════════════════════════════════════════════════════════════╣");
         
         for (int chunkIndex = 0; chunkIndex < download.totalChunks; chunkIndex++) {
             int peerIndex = chunkIndex % workerCount;
-            String assignedPeerId = peerIdArray[peerIndex];
+            String assignedPeerId = workerPeerIds[peerIndex];
             DownloadWorker worker = download.workers.get(assignedPeerId);
             
             if (worker != null) {
                 worker.queueTask(hash, chunkIndex);
                 download.inProgressChunks.set(chunkIndex);
-                System.out.println("DEBUG: ✓ Chunk " + chunkIndex + " assigned to peer " + assignedPeerId);
-            } else {
-                System.err.println("DEBUG ERROR: Worker is NULL for peerId: " + assignedPeerId);
+                
+                System.out.println("║ Chunk " + String.format("%3d", chunkIndex) + " → Peer " + assignedPeerId);
             }
         }
+        
+        System.out.println("╚══════════════════════════════════════════════════════════════╝\n");
     }
 
     public ActiveDownload getDownload(String hash) {
         return downloads.get(hash);
     }
 
-    public void receiveChunk(String hash, int chunkIndex, byte[] data, String peerId) {
+    public void receiveChunk(String hash, int chunkIndex, byte[] data, String peerIp) {
         ActiveDownload download = downloads.get(hash);
         if (download == null)
             return;
@@ -201,11 +216,26 @@ public class DownloadManager {
 
                 download.completedChunks.set(chunkIndex);
                 download.inProgressChunks.clear(chunkIndex);
-                System.out.println("Chunk " + chunkIndex + "/" + download.totalChunks + " received for " + download.fileName + " from " + peerId);
+                
+                int totalReceived = download.completedChunks.cardinality();
+                int lastConsecutive = download.getLastConsecutiveChunk();
+                int firstMissing = download.getFirstMissingChunk();
+                float progress = download.getProgress();
+                
+                System.out.println("\n╔════════════════════════════════════════════════════════════════╗");
+                System.out.println("║ CHUNK RECEIVED - " + download.fileName);
+                System.out.println("╠════════════════════════════════════════════════════════════════╣");
+                System.out.println("║ Chunk Index: " + chunkIndex + " / " + download.totalChunks);
+                System.out.println("║ From Peer: " + peerIp);
+                System.out.println("║ Total Received: " + totalReceived + " / " + download.totalChunks);
+                System.out.println("║ Last Consecutive: " + lastConsecutive + " (chunks 0-" + lastConsecutive + " ready)");
+                System.out.println("║ First Missing: " + firstMissing);
+                System.out.println(String.format("║ Progress: %.1f%%", progress));
+                System.out.println("╚════════════════════════════════════════════════════════════════╝\n");
 
                 // Notify GUI
                 if (chunkListener != null) {
-                    chunkListener.onChunkReceived(download.fileName, chunkIndex, download.totalChunks, peerId);
+                    chunkListener.onChunkReceived(download.fileName, chunkIndex, download.totalChunks, peerIp);
                 }
 
                 if (download.isComplete()) {
@@ -219,5 +249,10 @@ public class DownloadManager {
                 e.printStackTrace();
             }
         }
+    }
+
+    // Get all active downloads
+    public ConcurrentHashMap<String, ActiveDownload> getActiveDownloads() {
+        return downloads;
     }
 }
