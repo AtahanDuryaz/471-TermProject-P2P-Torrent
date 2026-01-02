@@ -1,0 +1,8 @@
+# Docker .gitignore entries
+
+# Ignore peer video and buffer directories
+videos_peer*/
+buffer_peer*/
+
+# Docker build artifacts
+.dockerignore

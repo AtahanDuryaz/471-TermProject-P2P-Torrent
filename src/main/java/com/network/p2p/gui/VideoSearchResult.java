@@ -24,6 +24,14 @@ public class VideoSearchResult {
     }
 
     public String getDisplayText() {
-        return fileName + " (" + (size / 1024) + " KB) - " + peerIds.size() + " peer(s)";
+        StringBuilder sb = new StringBuilder();
+        sb.append(fileName).append(" (").append(size / 1024).append(" KB)");
+        sb.append(" [Peers: ");
+        for (int i = 0; i < peerIds.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(peerIds.get(i));
+        }
+        sb.append("]");
+        return sb.toString();
     }
 }

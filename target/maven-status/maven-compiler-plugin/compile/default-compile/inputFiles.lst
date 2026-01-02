@@ -1,10 +1,10 @@
-C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\gui\MainFrame.java
-C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\gui\VideoSearchResult.java
-C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\managers\DownloadManager.java
-C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\managers\DownloadWorker.java
 C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\managers\FileManager.java
-C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\managers\PeerManager.java
 C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\network\DiscoveryService.java
+C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\managers\DownloadManager.java
 C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\network\FileServer.java
-C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\network\Protocol.java
+C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\gui\MainFrame.java
+C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\managers\PeerManager.java
 C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\P2PVideoApp.java
+C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\network\Protocol.java
+C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\gui\VideoSearchResult.java
+C:\Users\ataka\Desktop\Network_Proje\src\main\java\com\network\p2p\managers\DownloadWorker.java

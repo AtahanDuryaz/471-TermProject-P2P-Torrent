@@ -306,19 +306,56 @@ public class MainFrame extends JFrame {
 
         JTextField searchField = new JTextField();
         JButton searchButton = new JButton("Search Network");
+        JButton addDockerPeersButton = new JButton("🐳 Add Docker Peers");
 
         searchButton.addActionListener(e -> {
             String query = searchField.getText().trim();
+            log("Searching for: " + (query.isEmpty() ? "*" : query));
+            
+            // 1. Broadcast to network peers (UDP) if query not empty
             if (!query.isEmpty()) {
-                log("Searching for: " + query);
                 String message = "ID:" + discoveryService.getPeerId() + ":" + query;
                 discoveryService.broadcastPacket(com.network.p2p.network.Protocol.TYPE_QUERY_FILES, message, 3);
             }
+            
+            // 2. Filter already loaded files (from manual peers like Docker)
+            videoListModel.clear();
+            for (VideoSearchResult vsr : searchResults.values()) {
+                if (query.isEmpty() || vsr.fileName.toLowerCase().contains(query.toLowerCase())) {
+                    videoListModel.addElement(vsr.getDisplayText());
+                }
+            }
+            
+            if (videoListModel.isEmpty()) {
+                log("No files found" + (query.isEmpty() ? "" : " matching: " + query));
+            } else {
+                log("Found " + videoListModel.size() + " matching files");
+            }
         });
+
+        addDockerPeersButton.addActionListener(e -> {
+            // Add Docker container peers via localhost port mappings
+            peerManager.addManualPeer("docker-peer1", "127.0.0.1", 51001);
+            peerManager.addManualPeer("docker-peer2", "127.0.0.1", 52001);
+            peerManager.addManualPeer("docker-peer3", "127.0.0.1", 53001);
+            log("✓ Added 3 Docker peers via localhost ports 51001, 52001, 53001");
+            JOptionPane.showMessageDialog(this, 
+                "Docker peers added!\n" +
+                "- docker-peer1 @ localhost:51001\n" +
+                "- docker-peer2 @ localhost:52001\n" +
+                "- docker-peer3 @ localhost:53001\n\n" +
+                "Now click 'Search Network' to find their files.",
+                "Docker Peers Added", 
+                JOptionPane.INFORMATION_MESSAGE);
+        });
+
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        buttonPanel.add(searchButton);
+        buttonPanel.add(addDockerPeersButton);
 
         panel.add(new JLabel("Search File: "), BorderLayout.WEST);
         panel.add(searchField, BorderLayout.CENTER);
-        panel.add(searchButton, BorderLayout.EAST);
+        panel.add(buttonPanel, BorderLayout.EAST);
         return panel;
     }
 
@@ -350,16 +387,47 @@ public class MainFrame extends JFrame {
                     long size = result.size;
                     String hash = result.hash;
 
-                    log("=== DEBUG: Starting download of " + fname + " from " + result.peerIds.size() + " peer(s) ===");
-                    log("DEBUG: PeerIds in result: " + result.peerIds);
+                    // Show peer selection dialog if multiple peers available
+                    java.util.List<String> selectedPeers = new java.util.ArrayList<>();
+                    if (result.peerIds.size() > 1) {
+                        // Multi-selection dialog
+                        JPanel panel = new JPanel(new BorderLayout(10, 10));
+                        panel.add(new JLabel("Select peers to download from:"), BorderLayout.NORTH);
+                        
+                        JList<String> peerList = new JList<>(result.peerIds.toArray(new String[0]));
+                        peerList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+                        peerList.setSelectedIndex(0); // Select first by default
+                        panel.add(new JScrollPane(peerList), BorderLayout.CENTER);
+                        
+                        int option = JOptionPane.showConfirmDialog(MainFrame.this, panel, 
+                            "Download: " + fname, JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+                        
+                        if (option != JOptionPane.OK_OPTION) return;
+                        
+                        java.util.List<String> selectedPeersList = peerList.getSelectedValuesList();
+                        if (selectedPeersList.isEmpty()) {
+                            JOptionPane.showMessageDialog(MainFrame.this, "Please select at least one peer", "No Peer Selected", JOptionPane.WARNING_MESSAGE);
+                            return;
+                        }
+                        selectedPeers.addAll(selectedPeersList);
+                    } else {
+                        // Only one peer, use it directly
+                        selectedPeers.addAll(result.peerIds);
+                    }
 
-                    // Collect ALL peers for this file - use peerIds instead of IPs (same IP can have multiple peers)
+                    log("=== DEBUG: Starting download of " + fname + " from " + selectedPeers.size() + " peer(s) ===");
+                    log("DEBUG: Selected PeerIds: " + selectedPeers);
+
+                    log("=== DEBUG: Starting download of " + fname + " from " + selectedPeers.size() + " peer(s) ===");
+                    log("DEBUG: Selected PeerIds: " + selectedPeers);
+
+                    // Collect ONLY SELECTED peers for this file
                     java.util.Set<String> peerIds = new java.util.HashSet<>();
                     java.util.Map<String, String> peerIdToIp = new java.util.HashMap<>();
                     java.util.Map<String, Integer> peerIdToPort = new java.util.HashMap<>();
                     
                     log("DEBUG: Total peers in PeerManager: " + peerManager.getPeers().size());
-                    for (String peerId : result.peerIds) {
+                    for (String peerId : selectedPeers) {
                         log("DEBUG: Looking for peerId: " + peerId);
                         PeerManager.PeerInfo pInfo = peerManager.getPeers().get(peerId);
                         if (pInfo == null) {
@@ -414,13 +482,16 @@ public class MainFrame extends JFrame {
                                     
                                     // VLC options for progressive streaming
                                     String[] options = {
-                                        ":file-caching=300",              // File caching 300ms (low for progressive)
-                                        ":network-caching=300",           // Network caching 300ms
-                                        ":live-caching=300",              // Live caching 300ms
-                                        ":clock-jitter=0",                // No jitter
-                                        ":clock-synchro=0",               // No clock synchro (important for progressive)
-                                        ":start-paused"                   // Start paused, will auto-play when chunks ready
-                                    };
+                                            ":file-caching=300",
+                                            ":network-caching=300",
+                                            ":live-caching=300",
+                                            ":demux=avformat",           // ← EKLE: Incomplete file'ları zorla
+                                            ":avformat-format=mp4",      // ← EKLE: MP4 parse et
+                                            ":no-mov-faststart",         // ← EKLE: Moov atom'u bekleme
+                                            ":clock-jitter=0",
+                                            ":clock-synchro=0",
+                                            ":start-paused"
+                                        };
                                     mediaPlayerComponent.mediaPlayer().media().play(path, options);
                                     
                                     System.out.println("DEBUG VLC: Video loaded, setting to paused state");

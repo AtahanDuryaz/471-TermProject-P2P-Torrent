@@ -37,9 +37,24 @@ public class DiscoveryService {
     }
 
     private PeerDiscoveryListener listener;
+    private String broadcastAddress = "255.255.255.255"; // Default broadcast, can be overridden
 
     public DiscoveryService(PeerDiscoveryListener listener) {
-        this.peerId = UUID.randomUUID().toString().substring(0, 8); // Short Random ID
+        // Use PEER_ID environment variable if set, otherwise generate random ID
+        String envPeerId = System.getenv("PEER_ID");
+        if (envPeerId != null && !envPeerId.trim().isEmpty()) {
+            this.peerId = envPeerId.trim();
+        } else {
+            this.peerId = UUID.randomUUID().toString().substring(0, 8);
+        }
+        
+        // Use BROADCAST_ADDRESS environment variable if set
+        String envBroadcast = System.getenv("BROADCAST_ADDRESS");
+        if (envBroadcast != null && !envBroadcast.trim().isEmpty()) {
+            this.broadcastAddress = envBroadcast.trim();
+            logger.info("Using custom broadcast address: " + broadcastAddress);
+        }
+        
         this.listener = listener;
     }
     
@@ -253,10 +268,10 @@ public class DiscoveryService {
 
     private void forwardPacket(byte[] data, int length) {
         try {
-            InetAddress broadcastAddr = InetAddress.getByName("255.255.255.255");
+            InetAddress broadcastAddr = InetAddress.getByName(broadcastAddress);
             DatagramPacket packet = new DatagramPacket(data, length, broadcastAddr, DISCOVERY_PORT);
             socket.send(packet);
-            logger.info("Forwarded packet.");
+            logger.info("Forwarded packet to " + broadcastAddress);
         } catch (Exception e) {
             logger.warning("Failed to forward: " + e.getMessage());
         }
@@ -275,10 +290,10 @@ public class DiscoveryService {
             data[1] = type;
             System.arraycopy(contentBytes, 0, data, 2, contentBytes.length);
 
-            InetAddress broadcastAddr = InetAddress.getByName("255.255.255.255");
+            InetAddress broadcastAddr = InetAddress.getByName(broadcastAddress);
             DatagramPacket packet = new DatagramPacket(data, data.length, broadcastAddr, DISCOVERY_PORT);
             socket.send(packet);
-            logger.info("Broadcasted packet - Type: " + type + ", Content: " + content);
+            logger.info("Broadcasted packet to " + broadcastAddress + " - Type: " + type + ", Content: " + content);
         } catch (Exception e) {
             logger.warning("Failed to broadcast: " + e.getMessage());
         }

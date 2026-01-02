@@ -149,4 +149,77 @@ public class PeerManager implements DiscoveryService.PeerDiscoveryListener {
     public Map<String, PeerInfo> getPeers() {
         return knownPeers;
     }
+
+    /**
+     * Manually add a peer (useful for connecting to Docker containers via port mapping)
+     * @param peerId Peer identifier
+     * @param ipAddress IP address (use "localhost" or "127.0.0.1" for Docker mapped ports)
+     * @param port File server port (for Docker: 51001, 52001, 53001, etc.)
+     */
+    public void addManualPeer(String peerId, String ipAddress, int port) {
+        PeerInfo info = new PeerInfo(peerId, ipAddress, port);
+        knownPeers.put(peerId, info);
+        System.out.println("✓ Manually added peer: " + peerId + "@" + ipAddress + ":" + port);
+        
+        // Fetch file list from this peer via TCP
+        fetchFileListFromPeer(peerId, ipAddress, port);
+        
+        if (guiUpdateCallback != null) {
+            guiUpdateCallback.run();
+        }
+    }
+    
+    /**
+     * Fetch file list from a peer via TCP connection
+     */
+    private void fetchFileListFromPeer(String peerId, String ipAddress, int port) {
+        new Thread(() -> {
+            System.out.println("🔍 DEBUG: Starting fetchFileListFromPeer for " + peerId + " at " + ipAddress + ":" + port);
+            try (java.net.Socket socket = new java.net.Socket(ipAddress, port);
+                 java.io.DataOutputStream out = new java.io.DataOutputStream(socket.getOutputStream());
+                 java.io.DataInputStream in = new java.io.DataInputStream(socket.getInputStream())) {
+                
+                System.out.println("🔍 DEBUG: TCP connection established to " + peerId);
+                
+                // Send LIST_FILES request (type = 1)
+                System.out.println("🔍 DEBUG: Sending LIST_FILES request (type=1) to " + peerId);
+                out.writeInt(1);
+                out.flush();
+                System.out.println("🔍 DEBUG: Request sent, waiting for response...");
+                
+                // Read response: [FileCount(4)] then for each file: [NameLen(4)][Name][Size(8)][HashLen(4)][Hash]
+                int fileCount = in.readInt();
+                System.out.println("✅ Received " + fileCount + " files from " + peerId);
+                
+                for (int i = 0; i < fileCount; i++) {
+                    System.out.println("🔍 DEBUG: Reading file #" + (i+1) + "/" + fileCount);
+                    int nameLen = in.readInt();
+                    byte[] nameBytes = new byte[nameLen];
+                    in.readFully(nameBytes);
+                    String fileName = new String(nameBytes, "UTF-8");
+                    
+                    long fileSize = in.readLong();
+                    
+                    int hashLen = in.readInt();
+                    byte[] hashBytes = new byte[hashLen];
+                    in.readFully(hashBytes);
+                    String fileHash = new String(hashBytes, "UTF-8");
+                    
+                    System.out.println("✅ File #" + (i+1) + ": " + fileName + " (" + fileSize + " bytes, hash: " + fileHash.substring(0, 16) + "...)");
+                    
+                    // Notify search listener as if this was a search result
+                    if (searchListener != null) {
+                        System.out.println("🔍 DEBUG: Notifying searchListener for " + fileName);
+                        searchListener.onSearchResult(fileName, fileSize, fileHash, peerId);
+                    } else {
+                        System.err.println("❌ DEBUG: searchListener is NULL! Cannot notify GUI!");
+                    }
+                }
+                System.out.println("✅ Successfully fetched all files from " + peerId);
+            } catch (Exception e) {
+                System.err.println("❌ Failed to fetch file list from " + peerId + ": " + e.getMessage());
+                e.printStackTrace();
+            }
+        }).start();
+    }
 }

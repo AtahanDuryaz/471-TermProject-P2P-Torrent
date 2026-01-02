@@ -68,7 +68,8 @@ public class DownloadWorker implements Runnable {
                 try (DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                         DataInputStream in = new DataInputStream(socket.getInputStream())) {
 
-                    // Request: [HashLen(4)][HashBytes][ChunkIndex(4)]
+                    // Request: [RequestType(4)][HashLen(4)][HashBytes][ChunkIndex(4)]
+                    out.writeInt(0); // 0 = CHUNK_REQUEST
                     byte[] hashBytes = hash.getBytes();
                     out.writeInt(hashBytes.length);
                     out.write(hashBytes);
