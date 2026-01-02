@@ -91,9 +91,13 @@ public class DownloadWorker implements Runnable {
 
                         manager.receiveChunk(hash, chunkIndex, data, peerId);
                         
-                        // DELAY: Simulate slow network to test progressive streaming
-                        // This will cause video to buffer/pause while waiting for chunks
-                        Thread.sleep(1000); // 300ms delay per chunk
+                        // First 15 chunks: fast (for VLC to start)
+                        // Rest: slower (for visible progressive streaming)
+                        if (chunkIndex < 15) {
+                            Thread.sleep(50); // Fast initial buffering
+                        } else {
+                            Thread.sleep(200); // Slower for visible progress
+                        }
                     } else {
                         System.err.println("DEBUG Worker[" + peerId + "]: ERROR - Peer returned error status for chunk " + chunkIndex);
                         // Re-queue or mark failed? For now drop.

@@ -8,7 +8,6 @@ com\network\p2p\network\Protocol.class
 com\network\p2p\managers\DownloadWorker.class
 com\network\p2p\network\FileServer.class
 com\network\p2p\gui\MainFrame.class
-com\network\p2p\gui\MainFrame$2.class
 com\network\p2p\managers\PeerManager$PeerInfo.class
 com\network\p2p\managers\FileManager$SharedFile.class
 com\network\p2p\managers\PeerManager$SearchResultListener.class
